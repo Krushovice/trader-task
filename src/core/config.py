@@ -9,6 +9,7 @@ class ApiConfig(BaseModel):
 
 class WebsocketConfig(BaseModel):
     url: str
+    symbol: str
     max_bars_wait: int = 12
     retest_pct: float = 0.003
 
