@@ -1,0 +1,14 @@
+version: '3.8'
+services:
+  lcu-bot:
+    build: .
+    container_name: lcu-bot
+    restart: always
+    env_file:
+      - .env       # файл с API_KEY и API_SECRET
+    networks:
+      - lcu-net
+
+networks:
+  lcu-net:
+    driver: bridge
