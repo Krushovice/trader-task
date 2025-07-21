@@ -1,14 +1,14 @@
-FROM python:3.13-slim
+FROM python:3.11-slim
 
 # Устанавливаем Poetry
 RUN pip install --no-cache-dir poetry
 
 WORKDIR /app
 
-# Копируем описания зависимостей
+# Копируем описание зависимостей
 COPY pyproject.toml poetry.lock* ./
 
-# Устанавливаем зависимости без создания виртуального окружения
+# Устанавливаем зависимости (без виртуального окружения)
 RUN poetry config virtualenvs.create false \
     && poetry install --no-interaction --no-ansi
 
