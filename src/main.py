@@ -166,6 +166,7 @@ async def replay_loop():
         await handle_kline(k)
         await asyncio.sleep(0)  # без задержки
     await executor.close()
+    await rest.close()
     logger.info("Replay finished")
 
 
@@ -178,6 +179,7 @@ async def main():
         ws = DataWS(handle_kline)
         await ws.start()
         await executor.close()
+        await rest.close()
         logger.info("Live mode stopped")
     else:
         await replay_loop()
