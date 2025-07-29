@@ -1,4 +1,7 @@
 import asyncio
+import logging
+import os
+
 import pandas as pd
 import ccxt.async_support as ccxt
 
@@ -10,13 +13,18 @@ from trade import (
     Executor,
 )
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s:%(message)s",
+)
+logger = logging.getLogger(__name__)
 
 # Инициализация стратегии и исполнителя
 state = StrategyState()
 executor = Executor()
 
-symbol = settings.ws.symbol
-
+SYMBOl = settings.ws.symbol
+MODE = settings.ws.mode
 
 # REST-клиент Bybit для H1 и D
 rest = ccxt.bybit({"enableRateLimit": True})
@@ -55,14 +63,8 @@ async def fetch_df(
 
 
 async def handle_kline(kline: dict):
-    """
-    При каждом подтверждённом 5m-баре:
-      1. Собираем последний бар в df_5 и считаем EMA60/EMA163.
-      2. Загружаем H1 и D данные для EMA60 и RSI.
-      3. Получаем сигналы.
-      4. Выставляем лимитный ордер под текущую цену.
-    """
-    # 1) 5m бар
+    logger.info("Received new 5m bar at %s", kline["start_at"])
+    # Формируем df_5 для последнего бара
     df_5 = pd.DataFrame(
         [
             [
@@ -85,48 +87,100 @@ async def handle_kline(kline: dict):
         window=163,
     )
 
-    # 2) H1 и D
+    # Получаем старшие TF
     df_1h = await fetch_df(
-        symbol,
+        SYMBOl,
         "1h",
         limit=200,
     )
     df_1d = await fetch_df(
-        symbol,
+        SYMBOl,
         "1d",
         limit=50,
     )
 
-    # 3) Сигналы
+    # Генерируем сигналы
     long_signal, short_signal = state.on_new_bar(
         kline,
         df_5,
         df_1h,
         df_1d,
     )
+    logger.info(
+        "Signals — Long: %s, Short: %s",
+        long_signal,
+        short_signal,
+    )
 
-    # 4) Ордер
+    # Баланс и цена
     balance = (await executor.exchange.fetch_balance())["total"]["USDT"]
     price = float(kline["close"])
-    if long_signal:
-        await executor.order(
-            "long",
-            price,
-            balance,
-        )
-    if short_signal:
-        await executor.order(
-            "short",
-            price,
-            balance,
-        )
+    logger.info(
+        "Current balance: %f USDT, price: %f",
+        balance,
+        price,
+    )
+
+    # Исполнение ордера
+    if MODE == "live":
+        if long_signal:
+            await executor.order(
+                "long",
+                price,
+                balance,
+            )
+        if short_signal:
+            await executor.order(
+                "short",
+                price,
+                balance,
+            )
+    else:
+        # replay mode: dry-run
+        if long_signal or short_signal:
+            logger.info(
+                "[DRY-RUN] Would place %s order at %f",
+                "long" if long_signal else "short",
+                price,
+            )
+
+
+async def replay_loop():
+    # история 5m, 1h, 1d
+    logger.info("Starting replay mode for historical data")
+    df5 = await fetch_df(
+        SYMBOl,
+        "5m",
+        limit=1000,
+    )
+
+    for _, row in df5.iterrows():
+        k = {
+            "start_at": row["ts"],
+            "open": row["o"],
+            "high": row["h"],
+            "low": row["l"],
+            "close": row["c"],
+            "volume": row["v"],
+        }
+        await handle_kline(k)
+        await asyncio.sleep(0)  # без задержки
+    await executor.close()
+    logger.info("Replay finished")
 
 
 async def main():
-    # Запускаем WebSocket-клиент
-    ws = DataWS(handle_kline)
-    await ws.start()
-    await executor.close()
+    logger.info(
+        "Starting Bybit LCUSDT.P trading bot in %s mode",
+        MODE,
+    )
+    if MODE == "live":
+        ws = DataWS(handle_kline)
+        await ws.start()
+        await executor.close()
+        logger.info("Live mode stopped")
+    else:
+        await replay_loop()
 
 
 if __name__ == "__main__":

@@ -1,14 +1,13 @@
-version: '3.8'
 services:
-  lcu-bot:
+  bybit:
     build: .
-    container_name: lcu-bot
+    container_name: bybit
     restart: always
     env_file:
-      - .env       # файл с API_KEY и API_SECRET
+      - .env
     networks:
-      - lcu-net
+      - bybit-net
 
 networks:
-  lcu-net:
+  bybit-net:
     driver: bridge
