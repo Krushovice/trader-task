@@ -1,54 +1,40 @@
 import asyncio
 import logging
-import os
-
 import pandas as pd
 import ccxt.async_support as ccxt
+from datetime import datetime, timezone
 
 from core.config import settings
-from trade import (
-    DataWS,
-    Indicators,
-    StrategyState,
-    Executor,
-)
+from trade.data_ws import DataWS
+from trade.indicators import Indicators
+from trade.strategy import StrategyState
+from trade.execution import Executor
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s:%(message)s",
-)
+# Логирование
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s:%(message)s")
 logger = logging.getLogger(__name__)
 
-# Инициализация стратегии и исполнителя
+# Инициализация
 state = StrategyState()
 executor = Executor()
-
-SYMBOl = settings.ws.symbol
-MODE = settings.ws.mode
-
-# REST-клиент Bybit для H1 и D
 rest = ccxt.bybit({"enableRateLimit": True})
+
+SYMBOL = settings.ws.symbol
+MODE = settings.ws.mode
+RETEST_PCT = settings.ws.retest_pct
 
 
 async def fetch_df(
     symbol: str,
     timeframe: str,
     limit: int,
-) -> pd.DataFrame:
-    """
-    Получаем исторические данные и рассчитываем индикаторы:
-      - EMA60 для 1h
-      - RSI14 для 1d
-    """
+):
     ohlcv = await rest.fetch_ohlcv(
         symbol.upper(),
         timeframe,
         limit=limit,
     )
-    df = pd.DataFrame(
-        ohlcv,
-        columns=["ts", "o", "h", "l", "c", "v"],
-    )
+    df = pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
     if timeframe == "1h":
         df["ema60"] = Indicators.ema(
             df["c"],
@@ -62,9 +48,15 @@ async def fetch_df(
     return df
 
 
-async def handle_kline(kline: dict):
-    logger.info("Received new 5m bar at %s", kline["start_at"])
-    # Формируем df_5 для последнего бара
+async def handle_kline(kline):
+    # Дата бара
+    bar_time = datetime.fromtimestamp(
+        kline["start_at"] / 1000,
+        timezone.utc,
+    )
+    logger.debug("5m bar at %s", bar_time.isoformat())
+
+    # Собираем df_5
     df_5 = pd.DataFrame(
         [
             [
@@ -87,19 +79,55 @@ async def handle_kline(kline: dict):
         window=163,
     )
 
-    # Получаем старшие TF
+    # Старшие TF
     df_1h = await fetch_df(
-        SYMBOl,
+        SYMBOL,
         "1h",
         limit=200,
     )
     df_1d = await fetch_df(
-        SYMBOl,
+        SYMBOL,
         "1d",
         limit=50,
     )
 
-    # Генерируем сигналы
+    # Промежуточные данные
+    price = float(kline["close"])
+    ema1h = df_1h["ema60"].iat[-1]
+    rsi1d = df_1d["rsi"].iat[-1]
+    price5 = df_5["c"].iat[-1]
+    ema60_5 = df_5["ema60_5"].iat[-1]
+    ema163_5 = df_5["ema163_5"].iat[-1]
+
+    logger.debug(
+        "State: breakout_ts=%s, retested=%s",
+        state.breakout_ts,
+        state.retested,
+    )
+    logger.debug(
+        "Values: price=%.6f, ema1h=%.6f, rsi1d=%.2f",
+        price,
+        ema1h,
+        rsi1d,
+    )
+
+    # Флаги для отладки
+    bounced = state.retested and abs(price - ema1h) / ema1h <= RETEST_PCT
+    mtf_long = price5 > ema60_5 and price5 > ema163_5
+    mtf_short = price5 < ema60_5 and price5 < ema163_5
+    rsi_long_ok = rsi1d <= 45
+    rsi_short_ok = rsi1d >= 55
+
+    logger.debug(
+        "Flags: bounced=%s, mtf_long=%s, mtf_short=%s, rsi_long_ok=%s, rsi_short_ok=%s",
+        bounced,
+        mtf_long,
+        mtf_short,
+        rsi_long_ok,
+        rsi_short_ok,
+    )
+
+    # Сигналы
     long_signal, short_signal = state.on_new_bar(
         kline,
         df_5,
@@ -112,16 +140,15 @@ async def handle_kline(kline: dict):
         short_signal,
     )
 
-    # Баланс и цена
+    # Баланс
     balance = (await executor.exchange.fetch_balance())["total"]["USDT"]
-    price = float(kline["close"])
-    logger.info(
-        "Current balance: %f USDT, price: %f",
+    logger.debug(
+        "Balance: %.6f USDT, price: %.6f",
         balance,
         price,
     )
 
-    # Исполнение ордера
+    # Ордер
     if MODE == "live":
         if long_signal:
             await executor.order(
@@ -136,24 +163,39 @@ async def handle_kline(kline: dict):
                 balance,
             )
     else:
-        # replay mode: dry-run
         if long_signal or short_signal:
             logger.info(
-                "[DRY-RUN] Would place %s order at %f",
+                "[DRY-RUN] Would place %s at %.6f",
                 "long" if long_signal else "short",
                 price,
             )
 
 
-async def replay_loop():
-    # история 5m, 1h, 1d
-    logger.info("Starting replay mode for historical data")
-    df5 = await fetch_df(
-        SYMBOl,
-        "5m",
-        limit=1000,
-    )
+async def run_live():
+    ws = DataWS(handle_kline)
+    await ws.start()
+    await executor.close()
+    await rest.close()
+    logger.info("Live stopped")
 
+
+async def run_replay():
+    logger.info("Starting replay mode")
+    df5 = await fetch_df(
+        SYMBOL,
+        "5m",
+        limit=500,
+    )
+    df1h = await fetch_df(
+        SYMBOL,
+        "1h",
+        limit=200,
+    )
+    df1d = await fetch_df(
+        SYMBOL,
+        "1d",
+        limit=50,
+    )
     for _, row in df5.iterrows():
         k = {
             "start_at": row["ts"],
@@ -164,25 +206,17 @@ async def replay_loop():
             "volume": row["v"],
         }
         await handle_kline(k)
-        await asyncio.sleep(0)  # без задержки
     await executor.close()
     await rest.close()
     logger.info("Replay finished")
 
 
 async def main():
-    logger.info(
-        "Starting Bybit LCUSDT.P trading bot in %s mode",
-        MODE,
-    )
+    logger.info("Bot started in %s mode", MODE)
     if MODE == "live":
-        ws = DataWS(handle_kline)
-        await ws.start()
-        await executor.close()
-        await rest.close()
-        logger.info("Live mode stopped")
+        await run_live()
     else:
-        await replay_loop()
+        await run_replay()
 
 
 if __name__ == "__main__":
