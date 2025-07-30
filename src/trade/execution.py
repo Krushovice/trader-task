@@ -1,5 +1,14 @@
+import logging
+
 import ccxt.async_support as ccxt
+
 from core.config import settings
+
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(message)s")
+logger = logging.getLogger(__name__)
+
+SYMBOL = settings.ws.symbol
 
 
 class Executor:
@@ -12,6 +21,9 @@ class Executor:
                 "options": {"defaultType": "swap"},
             }
         )
+        logger.info(
+            "Executor initialized for symbol %s",
+        )
 
     async def order(
         self,
@@ -19,22 +31,30 @@ class Executor:
         price: float,
         balance: float,
     ):
-        symbol = settings.ws.symbol
         raw_qty = balance * 0.4 / price
         markets = await self.exchange.fetch_markets()
-        market = next(m for m in markets if m["symbol"] == symbol)
+        market = next(m for m in markets if m["symbol"] == SYMBOL)
         step = float(market["info"]["lotSizeFilter"]["qtyStep"])
         qty = (raw_qty // step) * step
-        side = "buy" if action == "long" else "sell"
-        # Выставляем лимитный ордер по цене текущего закрытия
-        await self.exchange.create_order(
-            symbol,
+        side = "Buy" if action == "long" else "Sell"
+
+        logger.info(
+            "Placing %s limit order: qty=%f at price=%f",
+            side,
+            qty,
+            price,
+        )
+        order = await self.exchange.create_order(
+            SYMBOL,
             "limit",
             side,
             qty,
             price,
             {"timeInForce": "PostOnly"},
         )
+        logger.info("Order placed: %s", order)
+        return order
 
     async def close(self):
         await self.exchange.close()
+        logger.info("CCXT client closed")

@@ -9,4 +9,4 @@ __all__ = (
 from .data_ws import DataWS
 from .indicators import Indicators
 from .execution import Executor
-from .stategy import StrategyState
+from .strategy import StrategyState
