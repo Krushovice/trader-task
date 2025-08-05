@@ -23,6 +23,8 @@ class WebsocketConfig(BaseModel):
     take_profit_pct: Optional[float] = None
     balance_drawdown_limit_pct: float = 0.05
     min_atr_1h: Optional[float] = None
+    reconnect_delay: Optional[int] = None
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
