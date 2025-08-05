@@ -7,7 +7,11 @@ services:
       - .env
     networks:
       - bybit-net
-
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 networks:
   bybit-net:
     driver: bridge
