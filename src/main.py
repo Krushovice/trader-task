@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+
 import pandas as pd
 import ccxt.async_support as ccxt
 from datetime import datetime, timezone
@@ -70,28 +72,14 @@ async def handle_kline(kline):
         ],
         columns=["ts", "o", "h", "l", "c", "v"],
     )
-    df_5["ema60_5"] = Indicators.ema(
-        df_5["c"],
-        window=60,
-    )
-    df_5["ema163_5"] = Indicators.ema(
-        df_5["c"],
-        window=163,
-    )
+    df_5["ema60_5"] = Indicators.ema(df_5["c"], window=60)
+    df_5["ema163_5"] = Indicators.ema(df_5["c"], window=163)
 
     # Старшие TF
-    df_1h = await fetch_df(
-        SYMBOL,
-        "1h",
-        limit=200,
-    )
-    df_1d = await fetch_df(
-        SYMBOL,
-        "1d",
-        limit=50,
-    )
+    df_1h = await fetch_df(SYMBOL, "1h", limit=200)
+    df_1d = await fetch_df(SYMBOL, "1d", limit=50)
 
-    # Промежуточные данные
+    # Промежуточные значения
     price = float(kline["close"])
     ema1h = df_1h["ema60"].iat[-1]
     rsi1d = df_1d["rsi"].iat[-1]
@@ -111,21 +99,15 @@ async def handle_kline(kline):
         rsi1d,
     )
 
-    # Флаги для отладки
-    bounced = state.retested and abs(price - ema1h) / ema1h <= RETEST_PCT
-    mtf_long = price5 > ema60_5 and price5 > ema163_5
-    mtf_short = price5 < ema60_5 and price5 < ema163_5
-    rsi_long_ok = rsi1d <= 45
-    rsi_short_ok = rsi1d >= 55
-
-    logger.debug(
-        "Flags: bounced=%s, mtf_long=%s, mtf_short=%s, rsi_long_ok=%s, rsi_short_ok=%s",
-        bounced,
-        mtf_long,
-        mtf_short,
-        rsi_long_ok,
-        rsi_short_ok,
-    )
+    # ATR фильтр (если задан)
+    atr_1h = Indicators.atr(df_1h)
+    if settings.ws.min_atr_1h and atr_1h < settings.ws.min_atr_1h:
+        logger.warning(
+            "[SKIP] ATR too low (%.4f < %.4f) — skipping trade",
+            atr_1h,
+            settings.ws.min_atr_1h,
+        )
+        return
 
     # Сигналы
     long_signal, short_signal = state.on_new_bar(
@@ -134,10 +116,14 @@ async def handle_kline(kline):
         df_1h,
         df_1d,
     )
+
     logger.info(
-        "Signals — Long: %s, Short: %s",
+        "[SIGNAL] Long=%s | Short=%s | price=%.4f | ema1h=%.4f | rsi=%.2f",
         long_signal,
         short_signal,
+        price,
+        ema1h,
+        rsi1d,
     )
 
     # Баланс
@@ -148,7 +134,52 @@ async def handle_kline(kline):
         price,
     )
 
-    # Ордер
+    # Инициализация стартового баланса
+    if executor.start_balance == 0.0:
+        executor.start_balance = balance
+        logger.info(
+            "[BALANCE] Start balance: %.4f USDT",
+            balance,
+        )
+
+    # Проверка на просадку
+    drawdown_limit = executor.start_balance * (
+        1 - settings.ws.balance_drawdown_limit_pct
+    )
+    if balance < drawdown_limit:
+        if not executor.is_stopped_due_to_drawdown:
+            logger.critical(
+                "[STOP] Balance drawdown triggered! Balance: %.4f < Limit: %.4f",
+                balance,
+                drawdown_limit,
+            )
+            executor.is_stopped_due_to_drawdown = True
+            with open("stopped_due_to_drawdown.lock", "w") as f:
+                f.write(f"Stopped at {datetime.now().isoformat()} UTC\n")
+                f.write(f"Balance: {balance:.4f} USDT\n")
+                f.write(f"Drawdown limit: {drawdown_limit:.4f} USDT\n")
+        return
+
+    # Восстановление торговли при росте баланса
+    if executor.is_stopped_due_to_drawdown and balance >= executor.start_balance:
+        logger.info("[RESUME] Balance recovered. Resuming trading.")
+        executor.is_stopped_due_to_drawdown = False
+        try:
+            os.remove("stopped_due_to_drawdown.lock")
+            logger.info("[FILE] Lock file removed")
+        except FileNotFoundError:
+            pass
+
+    # Проверка на паузу после серии убытков
+    if executor.cooldown_bars > 0:
+        executor.cooldown_bars -= 1
+        logger.info(
+            "[PAUSE] Cooldown active (%d bars left)",
+            executor.cooldown_bars,
+        )
+        return
+
+    # Основная логика
     if MODE == "live":
         if long_signal:
             await executor.order(
@@ -162,6 +193,7 @@ async def handle_kline(kline):
                 price,
                 balance,
             )
+        await executor.check_trailing_stops(price)
     else:
         if long_signal or short_signal:
             logger.info(
@@ -169,14 +201,21 @@ async def handle_kline(kline):
                 "long" if long_signal else "short",
                 price,
             )
+        await executor.check_trailing_stops(price)
 
 
 async def run_live():
-    ws = DataWS(handle_kline)
-    await ws.start()
-    await executor.close()
-    await rest.close()
-    logger.info("Live stopped")
+    ws_client = DataWS(handle_kline)
+    task = asyncio.create_task(ws_client.start())
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await ws_client.stop()
+        await executor.close()
+        await rest.close()
+        logger.info("Live stopped")
 
 
 async def run_replay():
