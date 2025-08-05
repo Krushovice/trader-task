@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Optional
 
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -17,7 +18,11 @@ class WebsocketConfig(BaseModel):
     max_bars_wait: int = 12
     retest_pct: float = 0.003
     mode: str = "replay"
-
+    order_percent: float = 0.4
+    trailing_pct: float = 0.01
+    take_profit_pct: Optional[float] = None
+    balance_drawdown_limit_pct: float = 0.05
+    min_atr_1h: Optional[float] = None
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
