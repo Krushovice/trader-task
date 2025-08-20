@@ -55,27 +55,83 @@ class TradingApp:
         self.ws_client: Optional[DataWS] = None
 
     @staticmethod
+    def _tf_ms(timeframe: str) -> int:
+        tf = timeframe.lower()
+        if tf == "1m":
+            return 60_000
+        if tf == "3m":
+            return 180_000
+        if tf == "5m":
+            return 300_000
+        if tf == "15m":
+            return 900_000
+        if tf == "1h":
+            return 3_600_000
+        raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+    @staticmethod
     def latest_num(df: Optional[pd.DataFrame], col: str) -> Optional[float]:
         if df is None or df.empty or col not in df.columns:
             return None
         s = pd.to_numeric(df[col], errors="coerce").dropna()
         return float(s.iloc[-1]) if not s.empty else None
 
-    async def fetch_df(self, timeframe: str, limit: int) -> pd.DataFrame:
+    async def fetch_df_bars(
+        self,
+        timeframe: str,
+        total_bars: int,
+    ) -> pd.DataFrame:
+        """
+        Пагинатор OHLCV: тянет total_bars баров по timeframe (макс 1000 за вызов).
+        Использует prod-public REST (self.public_rest) и нормализованный символ.
+        """
+
         ccxt_symbol = to_ccxt_linear_symbol(self.symbol)
-        ohlcv = await self.public_rest.fetch_ohlcv(
-            ccxt_symbol,
-            timeframe,
-            limit=limit,
-        )
-        if not ohlcv:
-            logger.warning(
-                "No OHLCV for %s %s — got empty response",
+        ms_per_bar = self._tf_ms(timeframe)
+        result: list[list[float]] = []
+        since = None
+        remaining = total_bars
+        last_last_ts = None
+
+        while remaining > 0:
+            limit = min(1000, remaining)
+            ohlcv = await self.public_rest.fetch_ohlcv(
+                ccxt_symbol,
+                timeframe,
+                limit=limit,
+                since=since,
+            )
+            if not ohlcv:
+                break
+
+            # защита от зацикливания (если биржа игнорит since)
+            if last_last_ts is not None and ohlcv[-1][0] <= last_last_ts:
+                break
+            last_last_ts = ohlcv[-1][0]
+
+            result.extend(ohlcv)
+            remaining -= len(ohlcv)
+            since = ohlcv[-1][0] + ms_per_bar  # следующий «срез» после последнего ts
+
+            if len(ohlcv) < limit:
+                # отдали меньше, чем просили — дальше нечего тянуть
+                break
+
+        if not result:
+            logger.error(
+                "Replay: empty OHLCV for %s %s — nothing to simulate",
                 ccxt_symbol,
                 timeframe,
             )
             return pd.DataFrame(columns=["ts", "o", "h", "l", "c", "v"])
-        return pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
+
+        # на всякий случай уникализируем/сортируем
+        df = (
+            pd.DataFrame(result, columns=["ts", "o", "h", "l", "c", "v"])
+            .drop_duplicates(subset=["ts"])
+            .sort_values("ts")
+        )
+        return df
 
     async def handle_kline(self, raw_kline: dict) -> None:
         kline = normalize_kline(raw_kline)
@@ -87,6 +143,9 @@ class TradingApp:
         df_base = self.base_tf_buffer.to_df()
         if df_base.empty:
             return
+        if len(df_base) % 500 == 0:
+            logger.info("Replay progress: %d bars processed", len(df_base))
+
 
         ema60_5 = Indicators.ema(df_base["c"], window=60)
         ema163_5 = Indicators.ema(df_base["c"], window=163)
@@ -252,17 +311,18 @@ class TradingApp:
             self.base_timeframe,
         )
         try:
-            df_base = await self.fetch_df(
+            df_base = await self.fetch_df_bars(
                 self.base_timeframe,
-                limit=1000,
+                total_bars=5000,
+            )  # ~35 дней 5m хватит для RSI14@1d
+            logger.info(
+                "Replay dataset: %d bars %s",
+                len(df_base),
+                self.base_timeframe,
             )
             if df_base.empty:
-                logger.error(
-                    "Replay: empty OHLCV for %s %s — nothing to simulate",
-                    self.symbol,
-                    self.base_timeframe,
-                )
                 return
+
             for _, row in df_base.iterrows():
                 k = {
                     "ts": row["ts"],
@@ -274,7 +334,6 @@ class TradingApp:
                 }
                 await self.handle_kline(k)
         finally:
-            # закрываем всегда, даже если в цикле было исключение
             await self.executor.close()
             await self.public_rest.close()
             logger.info("Replay finished")
