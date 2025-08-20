@@ -86,8 +86,8 @@ class TradingApp:
             return
 
         # 2) HTF: агрегируем из 5m (универсально для live/replay)
-        df_1h = aggregate_ohlcv(df_base, "1H")
-        df_1d = aggregate_ohlcv(df_base, "1D")
+        df_1h = aggregate_ohlcv(df_base, "1h")
+        df_1d = aggregate_ohlcv(df_base, "1d")
 
         # индикаторы HTF
         if df_1h is None or df_1h.empty or len(df_1h) < 60:
