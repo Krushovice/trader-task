@@ -109,7 +109,10 @@ class TradingApp:
         while len(result) < total_bars:
             limit = min(1000, total_bars - len(result))
             ohlcv = await self.public_rest.fetch_ohlcv(
-                ccxt_symbol, timeframe, since=since, limit=limit
+                ccxt_symbol,
+                timeframe,
+                since=since,
+                limit=limit,
             )
             if not ohlcv:
                 break
