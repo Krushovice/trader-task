@@ -39,3 +39,13 @@ def aggregate_ohlcv(df_base: pd.DataFrame, rule: str) -> pd.DataFrame:
     )
     agg["ts"] = (agg["dt"].astype("int64") // 10**6).astype("int64")  # обратно в мс
     return agg[["ts", "o", "h", "l", "c", "v"]]
+
+
+def to_ccxt_linear_symbol(symbol: str) -> str:
+    symb = symbol.upper().strip()
+    # простая поддержка USDT quote (можно расширить при необходимости)
+    if symb.endswith("USDT"):
+        base = symb[:-4]
+        return f"{base}/USDT:USDT"  # USDT-маржинальный linear
+    # если уже в нормальном формате — вернём как есть
+    return symb
