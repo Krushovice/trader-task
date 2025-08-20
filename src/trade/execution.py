@@ -1,15 +1,4 @@
 import logging
-
-import ccxt.async_support as ccxt
-
-from core.config import settings
-from .trailing import TrailingStopManager
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(message)s")
-logger = logging.getLogger(__name__)
-
-# trade/execution.py
-import logging
 from decimal import Decimal, ROUND_DOWN
 from typing import Optional
 
@@ -18,6 +7,8 @@ from core.config import settings
 from trade.trailing import TrailingStopManager  # твой модуль с классом
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(message)s")
+
 SYMBOL = settings.ws.symbol
 
 
