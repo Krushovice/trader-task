@@ -33,16 +33,17 @@ class TradingApp:
         self.mode: str = settings.ws.mode
         self.base_timeframe: str = settings.ws.timeframe
 
-        # REST client (public/private) with proper testnet/prod URL
-        api_url = (
-            "https://api-testnet.bybit.com"
-            if settings.api.testnet
-            else "https://api.bybit.com"
-        )
+        # REST client (public/private)
+        public_api_url = "https://api.bybit.com"
         self.rest = ccxt.bybit(
             {
                 "enableRateLimit": True,
-                "urls": {"api": {"public": api_url, "private": api_url}},
+                "urls": {
+                    "api": {
+                        "public": public_api_url,
+                        "private": public_api_url,
+                    },
+                },
             }
         )
 
@@ -133,6 +134,8 @@ class TradingApp:
 
         # 3) ATR filter (optional)
         atr_1h = Indicators.atr(df_1h)
+        if atr_1h is not None and atr_1h <= 1e-9:
+            atr_1h = None  # считаем как «нет ATR»
         min_atr = settings.ws.min_atr_1h
         if min_atr is not None and (atr_1h is None or atr_1h < min_atr):
             logger.info(
