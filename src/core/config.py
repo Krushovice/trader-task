@@ -33,6 +33,7 @@ class WebsocketConfig(BaseModel):
     balance_drawdown_limit_pct: float = 0.05
     min_atr_1h: Optional[float] = None
     max_order_cost_usdt: Optional[float] = None
+    base_buffer_maxlen: Optional[int] = 8000
 
     # хотим, чтобы повторная установка значений тоже валидировалась
     model_config = {"validate_assignment": True}
