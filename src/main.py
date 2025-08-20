@@ -76,62 +76,73 @@ class TradingApp:
         s = pd.to_numeric(df[col], errors="coerce").dropna()
         return float(s.iloc[-1]) if not s.empty else None
 
-    async def fetch_df_bars(
-        self,
-        timeframe: str,
-        total_bars: int,
-    ) -> pd.DataFrame:
+    async def fetch_df_bars(self, timeframe: str, total_bars: int) -> pd.DataFrame:
         """
-        Пагинатор OHLCV: тянет total_bars баров по timeframe (макс 1000 за вызов).
-        Использует prod-public REST (self.public_rest) и нормализованный символ.
+        Вытягивает total_bars OHLCV с прод-паблика порциями по 1000,
+        начиная с (now - horizon) и двигаясь ВПЕРЁД по времени.
         """
+        def to_ccxt_linear_symbol(symbol: str) -> str:
+            s = symbol.upper().strip()
+            if s.endswith("USDT"):
+                base = s[:-4]
+                return f"{base}/USDT:USDT"  # USDT-margined linear perpetual
+            return s
 
         ccxt_symbol = to_ccxt_linear_symbol(self.symbol)
-        ms_per_bar = self._tf_ms(timeframe)
-        result: list[list[float]] = []
-        since = None
-        remaining = total_bars
-        last_last_ts = None
 
-        while remaining > 0:
-            limit = min(1000, remaining)
+        # размер бара в мс
+        def tf_ms(tf: str) -> int:
+            tf = tf.lower()
+            return {
+                "1m": 60_000, "3m": 180_000, "5m": 300_000,
+                "15m": 900_000, "1h": 3_600_000
+            }[tf]
+
+        ms_per_bar = tf_ms(timeframe)
+        now_ms = self.public_rest.milliseconds()
+
+        # Горизонт + запас на прогрев индикаторов (ещё 10%)
+        horizon = int(total_bars * 1.1) * ms_per_bar
+        since = now_ms - horizon
+
+        result: list[list[float]] = []
+        last_last_ts: Optional[int] = None
+
+        while len(result) < total_bars:
+            limit = min(1000, total_bars - len(result))
             ohlcv = await self.public_rest.fetch_ohlcv(
-                ccxt_symbol,
-                timeframe,
-                limit=limit,
-                since=since,
+                ccxt_symbol, timeframe, since=since, limit=limit
             )
             if not ohlcv:
                 break
 
-            # защита от зацикливания (если биржа игнорит since)
+            # защита от зависания курсора
             if last_last_ts is not None and ohlcv[-1][0] <= last_last_ts:
-                break
-            last_last_ts = ohlcv[-1][0]
+                since += limit * ms_per_bar
+                continue
 
             result.extend(ohlcv)
-            remaining -= len(ohlcv)
-            since = ohlcv[-1][0] + ms_per_bar  # следующий «срез» после последнего ts
+            last_last_ts = ohlcv[-1][0]
+            since = last_last_ts + ms_per_bar
 
-            if len(ohlcv) < limit:
-                # отдали меньше, чем просили — дальше нечего тянуть
+            # дошли до "сейчас" или биржа отдала меньше запрошенного
+            if since >= now_ms or len(ohlcv) < limit:
                 break
 
         if not result:
-            logger.error(
-                "Replay: empty OHLCV for %s %s — nothing to simulate",
-                ccxt_symbol,
-                timeframe,
-            )
-            return pd.DataFrame(columns=["ts", "o", "h", "l", "c", "v"])
+            logger.error("Replay: empty OHLCV for %s %s", ccxt_symbol, timeframe)
+            return pd.DataFrame(columns=["ts","o","h","l","c","v"])
 
-        # на всякий случай уникализируем/сортируем
-        df = (
-            pd.DataFrame(result, columns=["ts", "o", "h", "l", "c", "v"])
-            .drop_duplicates(subset=["ts"])
-            .sort_values("ts")
-        )
+        df = (pd.DataFrame(result, columns=["ts","o","h","l","c","v"])
+              .drop_duplicates(subset=["ts"])
+              .sort_values("ts"))
+
+        # Возьмём самые свежие total_bars (хвост)
+        if len(df) > total_bars:
+            df = df.iloc[-total_bars:]
+
         return df
+
 
     async def handle_kline(self, raw_kline: dict) -> None:
         kline = normalize_kline(raw_kline)
