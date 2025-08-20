@@ -1,10 +1,17 @@
 services:
   bybit:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: bybit
-    restart: always
+    restart: unless-stopped
     env_file:
-      - .env
+      - .env                   # переменные окружения для pydantic Settings
+    working_dir: /app
+    command: ["poetry", "run", "python", "-u", "src/main.py"]
+    volumes:
+      # (не обязательно) рабочий каталог, чтобы видеть лок-файл и логи с хоста
+      - ./data:/app/data
     networks:
       - bybit-net
     logging:
@@ -12,6 +19,7 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
 networks:
   bybit-net:
     driver: bridge
