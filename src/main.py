@@ -15,8 +15,7 @@ from trade.indicators import Indicators
 from trade.strategy import StrategyState
 from trade.execution import Executor
 from trade.buffer import BarBuffer
-from trade.utils import normalize_kline, aggregate_ohlcv
-
+from trade.utils import normalize_kline, aggregate_ohlcv, to_ccxt_linear_symbol
 
 LOG_LEVEL = os.getenv("APP_LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -62,10 +61,19 @@ class TradingApp:
         return float(s.iloc[-1]) if not s.empty else None
 
     async def fetch_df(self, timeframe: str, limit: int) -> pd.DataFrame:
-        """История для REPLAY (prod public REST), колонки: ts,o,h,l,c,v."""
+        ccxt_symbol = to_ccxt_linear_symbol(self.symbol)
         ohlcv = await self.public_rest.fetch_ohlcv(
-            self.symbol.upper(), timeframe, limit=limit
+            ccxt_symbol,
+            timeframe,
+            limit=limit,
         )
+        if not ohlcv:
+            logger.warning(
+                "No OHLCV for %s %s — got empty response",
+                ccxt_symbol,
+                timeframe,
+            )
+            return pd.DataFrame(columns=["ts", "o", "h", "l", "c", "v"])
         return pd.DataFrame(ohlcv, columns=["ts", "o", "h", "l", "c", "v"])
 
     async def handle_kline(self, raw_kline: dict) -> None:
@@ -247,6 +255,13 @@ class TradingApp:
                 self.base_timeframe,
                 limit=1000,
             )
+            if df_base.empty:
+                logger.error(
+                    "Replay: empty OHLCV for %s %s — nothing to simulate",
+                    self.symbol,
+                    self.base_timeframe,
+                )
+                return
             for _, row in df_base.iterrows():
                 k = {
                     "ts": row["ts"],
