@@ -6,6 +6,8 @@ from typing import Optional
 
 import pandas as pd
 import ccxt.async_support as ccxt
+from ta.trend import EMAIndicator
+from ta.momentum import RSIIndicator
 
 from core.config import settings
 from trade.data_ws import DataWS
@@ -88,25 +90,29 @@ class TradingApp:
         df_1d = aggregate_ohlcv(df_base, "1D")
 
         # индикаторы HTF
-        from ta.trend import EMAIndicator
-        from ta.momentum import RSIIndicator
+        if df_1h is None or df_1h.empty or len(df_1h) < 60:
+            ema1h = None
+        else:
+            _ema = EMAIndicator(
+                close=df_1h["c"],
+                window=60,
+                fillna=False,
+            ).ema_indicator()
+            _ema = _ema.dropna()
+            ema1h = float(_ema.iloc[-1]) if not _ema.empty else None
 
-        ema1h_series = (
-            EMAIndicator(close=df_1h["c"], window=60, fillna=False).ema_indicator()
-            if not df_1h.empty
-            else pd.Series(dtype=float)
-        )
-        rsi1d_series = (
-            RSIIndicator(close=df_1d["c"], window=14, fillna=False).rsi()
-            if not df_1d.empty
-            else pd.Series(dtype=float)
-        )
-        ema1h = (
-            float(ema1h_series.dropna().iloc[-1]) if not ema1h_series.empty else None
-        )
-        rsi1d = (
-            float(rsi1d_series.dropna().iloc[-1]) if not rsi1d_series.empty else None
-        )
+        # RSI14@1d
+        if df_1d is None or df_1d.empty or len(df_1d) < 14:
+            rsi1d = None
+        else:
+            _rsi = RSIIndicator(
+                close=df_1d["c"],
+                window=14,
+                fillna=False,
+            ).rsi()
+            _rsi = _rsi.dropna()
+            rsi1d = float(_rsi.iloc[-1]) if not _rsi.empty else None
+
         if ema1h is None or rsi1d is None:
             logger.debug("Warmup HTF (agg) in progress; skip bar")
             return
@@ -232,21 +238,30 @@ class TradingApp:
             logger.info("Live stopped")
 
     async def run_replay(self) -> None:
-        logger.info("Starting replay mode (TF=%s)", self.base_timeframe)
-        df_base = await self.fetch_df(self.base_timeframe, limit=1000)
-        for _, row in df_base.iterrows():
-            k = {
-                "ts": row["ts"],
-                "o": row["o"],
-                "h": row["h"],
-                "l": row["l"],
-                "c": row["c"],
-                "v": row["v"],
-            }
-            await self.handle_kline(k)
-        await self.executor.close()
-        await self.public_rest.close()
-        logger.info("Replay finished")
+        logger.info(
+            "Starting replay mode (TF=%s)",
+            self.base_timeframe,
+        )
+        try:
+            df_base = await self.fetch_df(
+                self.base_timeframe,
+                limit=1000,
+            )
+            for _, row in df_base.iterrows():
+                k = {
+                    "ts": row["ts"],
+                    "o": row["o"],
+                    "h": row["h"],
+                    "l": row["l"],
+                    "c": row["c"],
+                    "v": row["v"],
+                }
+                await self.handle_kline(k)
+        finally:
+            # закрываем всегда, даже если в цикле было исключение
+            await self.executor.close()
+            await self.public_rest.close()
+            logger.info("Replay finished")
 
     async def run(self) -> None:
         logger.info(
