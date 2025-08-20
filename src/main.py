@@ -38,6 +38,7 @@ class TradingApp:
         self.public_rest = ccxt.bybit(
             {
                 "enableRateLimit": True,
+                "options": {"defaultType": "linear"},  # ВАЖНО
                 "urls": {
                     "api": {
                         "public": "https://api.bybit.com",
