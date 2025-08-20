@@ -50,8 +50,9 @@ class TradingApp:
 
         # Состояние/буферы
         self.state = StrategyState()
-        self.base_tf_buffer = BarBuffer(maxlen=3000)  # хватит на прогрев EMA163
-
+        self.base_tf_buffer = BarBuffer(
+            maxlen=settings.ws.base_buffer_maxlen,
+        )
         self.ws_client: Optional[DataWS] = None
 
     @staticmethod
@@ -81,12 +82,6 @@ class TradingApp:
         Вытягивает total_bars OHLCV с прод-паблика порциями по 1000,
         начиная с (now - horizon) и двигаясь ВПЕРЁД по времени.
         """
-        def to_ccxt_linear_symbol(symbol: str) -> str:
-            s = symbol.upper().strip()
-            if s.endswith("USDT"):
-                base = s[:-4]
-                return f"{base}/USDT:USDT"  # USDT-margined linear perpetual
-            return s
 
         ccxt_symbol = to_ccxt_linear_symbol(self.symbol)
 
@@ -94,8 +89,11 @@ class TradingApp:
         def tf_ms(tf: str) -> int:
             tf = tf.lower()
             return {
-                "1m": 60_000, "3m": 180_000, "5m": 300_000,
-                "15m": 900_000, "1h": 3_600_000
+                "1m": 60_000,
+                "3m": 180_000,
+                "5m": 300_000,
+                "15m": 900_000,
+                "1h": 3_600_000,
             }[tf]
 
         ms_per_bar = tf_ms(timeframe)
@@ -130,19 +128,24 @@ class TradingApp:
                 break
 
         if not result:
-            logger.error("Replay: empty OHLCV for %s %s", ccxt_symbol, timeframe)
-            return pd.DataFrame(columns=["ts","o","h","l","c","v"])
+            logger.error(
+                "Replay: empty OHLCV for %s %s",
+                ccxt_symbol,
+                timeframe,
+            )
+            return pd.DataFrame(columns=["ts", "o", "h", "l", "c", "v"])
 
-        df = (pd.DataFrame(result, columns=["ts","o","h","l","c","v"])
-              .drop_duplicates(subset=["ts"])
-              .sort_values("ts"))
+        df = (
+            pd.DataFrame(result, columns=["ts", "o", "h", "l", "c", "v"])
+            .drop_duplicates(subset=["ts"])
+            .sort_values("ts")
+        )
 
         # Возьмём самые свежие total_bars (хвост)
         if len(df) > total_bars:
             df = df.iloc[-total_bars:]
 
         return df
-
 
     async def handle_kline(self, raw_kline: dict) -> None:
         kline = normalize_kline(raw_kline)
@@ -156,7 +159,6 @@ class TradingApp:
             return
         if len(df_base) % 500 == 0:
             logger.info("Replay progress: %d bars processed", len(df_base))
-
 
         ema60_5 = Indicators.ema(df_base["c"], window=60)
         ema163_5 = Indicators.ema(df_base["c"], window=163)
@@ -203,7 +205,9 @@ class TradingApp:
         min_atr = settings.ws.min_atr_1h
         if min_atr is not None and (atr_1h is None or atr_1h < min_atr):
             logger.info(
-                "[SKIP] ATR too low (%s < %s) — skipping trade", atr_1h, min_atr
+                "[SKIP] ATR too low (%s < %s) — skipping trade",
+                atr_1h,
+                min_atr,
             )
             return
 
@@ -247,7 +251,10 @@ class TradingApp:
 
             if self.executor.start_balance == 0.0:
                 self.executor.start_balance = balance
-                logger.info("[BALANCE] Start balance: %.4f USDT", balance)
+                logger.info(
+                    "[BALANCE] Start balance: %.4f USDT",
+                    balance,
+                )
 
             drawdown_limit = self.executor.start_balance * (
                 1 - settings.ws.balance_drawdown_limit_pct
@@ -255,7 +262,9 @@ class TradingApp:
             if balance < drawdown_limit:
                 if not self.executor.is_stopped_due_to_drawdown:
                     logger.critical(
-                        "[STOP] Balance drawdown! %.4f < %.4f", balance, drawdown_limit
+                        "[STOP] Balance drawdown! %.4f < %.4f",
+                        balance,
+                        drawdown_limit,
                     )
                     self.executor.is_stopped_due_to_drawdown = True
                     lock_path = os.getenv("LOCK_PATH", "stopped_due_to_drawdown.lock")
@@ -288,9 +297,17 @@ class TradingApp:
                 return
 
             if long_signal:
-                await self.executor.order("long", price, balance)
+                await self.executor.order(
+                    "long",
+                    price,
+                    balance,
+                )
             if short_signal:
-                await self.executor.order("short", price, balance)
+                await self.executor.order(
+                    "short",
+                    price,
+                    balance,
+                )
             await self.executor.check_trailing_stops(price)
         else:
             # REPLAY: только логируем намерения, никаких приватных запросов
@@ -325,7 +342,7 @@ class TradingApp:
             df_base = await self.fetch_df_bars(
                 self.base_timeframe,
                 total_bars=5000,
-            )  # ~35 дней 5m хватит для RSI14@1d
+            )
             logger.info(
                 "Replay dataset: %d bars %s",
                 len(df_base),
@@ -334,16 +351,20 @@ class TradingApp:
             if df_base.empty:
                 return
 
-            for _, row in df_base.iterrows():
-                k = {
-                    "ts": row["ts"],
-                    "o": row["o"],
-                    "h": row["h"],
-                    "l": row["l"],
-                    "c": row["c"],
-                    "v": row["v"],
-                }
+            cols = ["ts", "o", "h", "l", "c", "v"]
+
+            for i, (ts, o, h, l, c, v) in enumerate(
+                df_base[cols].itertuples(index=False, name=None),
+                start=1,
+            ):
+                k = {"ts": ts, "o": o, "h": h, "l": l, "c": c, "v": v}
                 await self.handle_kline(k)
+                if i % 500 == 0:
+                    logger.info(
+                        "Replay progress: %d/%d bars processed",
+                        i,
+                        len(df_base),
+                    )
         finally:
             await self.executor.close()
             await self.public_rest.close()
